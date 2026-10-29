@@ -29,6 +29,14 @@ if not secret:
     print("MCP_SECRET is not set", file=sys.stderr)
     sys.exit(1)
 
+# Render's value boxes can hold a stray space or line break that Cronometer's
+# website ignores but its app login rejects; trim them so the login matches.
+for _name in ("CRONOMETER_USERNAME", "CRONOMETER_PASSWORD", "CRONOMETER_TOTP_SECRET"):
+    _raw = os.environ.get(_name)
+    if _raw is not None and _raw != _raw.strip():
+        os.environ[_name] = _raw.strip()
+        print(f"Note: removed extra spaces or line breaks from {_name}", file=sys.stderr)
+
 import uvicorn
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import PlainTextResponse
