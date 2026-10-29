@@ -1,43 +1,71 @@
+# syntax=docker/dockerfile:1
 # Cronometer MCP server for Claude (web + mobile), hosted on Render's free tier.
 #
-# Based on the upstream image in rwestergren/cronometer-api-mcp, with two changes:
-#   1. Installs the published PyPI release (pinned) instead of copying source.
-#   2. Serves MCP at a secret path, /<MCP_SECRET>/mcp, because the server has
-#      no login of its own. Any other path returns 404.
+# Runs the server as ONE always-on web process (fast on Render's small free CPU),
+# answering only at a secret path, /<MCP_SECRET>/mcp. Any other path returns 404.
 #
-# Nothing personal lives in this file, so the GitHub repo holding it can be
-# public. Everything private goes in Render -> your service -> Environment:
-#   MCP_SECRET              long random string; becomes part of your private URL
-#   CRONOMETER_USERNAME     your Cronometer email
-#   CRONOMETER_PASSWORD     your Cronometer password
-#   CRONOMETER_TOTP_SECRET  only if your Cronometer account uses 2FA
-#   CRONOMETER_ACCOUNT_TZ   optional, e.g. Asia/Karachi
+# Nothing personal lives in this file. Private values go in Render -> Environment:
+#   MCP_SECRET, CRONOMETER_USERNAME (your email), CRONOMETER_PASSWORD,
+#   CRONOMETER_TOTP_SECRET (only with 2-step login)
 
-FROM supercorp/supergateway:uvx@sha256:2ffee900c18d8375096b392c8be15cd344535a05b753a5b182da227ab6306a15
+FROM python:3.14-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    UV_LINK_MODE=copy \
-    UV_COMPILE_BYTECODE=1 \
-    UV_PYTHON_INSTALL_DIR=/opt/uv-python \
-    UV_TOOL_DIR=/opt/uv-tools \
-    UV_TOOL_BIN_DIR=/usr/local/bin \
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PORT=10000 \
     HOME=/tmp \
     XDG_CACHE_HOME=/tmp/.cache
 
-# Python 3.14 + the Cronometer MCP server from PyPI (pinned release).
-RUN uv python install 3.14 \
-    && uv tool install --python 3.14 cronometer-api-mcp==0.2.6 \
-    && chmod -R a+rX /opt/uv-python /opt/uv-tools
+RUN pip install cronometer-api-mcp==0.2.6
 
-# Same fix as upstream: newer MCP SDK inside supergateway so claude.ai's
-# protocol version is accepted (otherwise Claude connects but sees no tools).
-RUN cd /usr/local/lib/node_modules/supergateway \
-    && npm install @modelcontextprotocol/sdk@^1.29.0 --no-save --no-audit --no-fund
+COPY <<'EOF' /app/start.py
+import os
+import sys
 
-# Logging is off (--logLevel none below) so the secret URL and your food data
-# never appear in logs. Runs as a non-root user; /tmp holds the login cache.
+# Secret path segment; .strip() ignores any stray space or line break pasted into Render.
+secret = os.environ.get("MCP_SECRET", "").strip()
+if not secret:
+    print("MCP_SECRET is not set", file=sys.stderr)
+    sys.exit(1)
+
+import uvicorn
+from mcp.server.transport_security import TransportSecuritySettings
+from starlette.responses import PlainTextResponse
+
+from cronometer_api_mcp.server import mcp
+
+import logging
+
+logging.disable(logging.INFO)  # quiet routine logs (e.g. the login email); warnings still show
+
+
+@mcp.custom_route("/healthz", methods=["GET"])
+async def healthz(request):
+    return PlainTextResponse("ok")
+
+
+# One long-running process: the server starts once at boot instead of once per
+# Claude connection. Stateless JSON mode survives Render restarts cleanly.
+app = mcp.streamable_http_app(
+    streamable_http_path=f"/{secret}/mcp",
+    stateless_http=True,
+    json_response=True,
+    host="0.0.0.0",
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+)
+
+uvicorn.run(
+    app,
+    host="0.0.0.0",
+    port=int(os.environ.get("PORT", "10000")),
+    log_level="warning",
+    access_log=False,  # keeps the secret URL out of logs
+    proxy_headers=True,
+    forwarded_allow_ips="*",
+)
+EOF
+
 USER 1000
 
-ENTRYPOINT ["/bin/sh", "-c", "if [ -z \"$MCP_SECRET\" ]; then echo 'MCP_SECRET is not set' >&2; exit 1; fi; exec supergateway --stdio cronometer-api-mcp --outputTransport streamableHttp --stateful --streamableHttpPath \"/$MCP_SECRET/mcp\" --healthEndpoint /healthz --port \"$PORT\" --sessionTimeout 3600000 --logLevel none"]
+CMD ["python", "/app/start.py"]
