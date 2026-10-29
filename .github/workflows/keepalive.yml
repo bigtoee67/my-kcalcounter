@@ -1,0 +1,16 @@
+name: keep-alive
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping health endpoint
+        env:
+          URL: ${{ secrets.KEEPALIVE_URL }}
+        run: curl -fsS --max-time 90 --retry 2 "$URL" || true
