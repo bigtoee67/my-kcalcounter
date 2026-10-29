@@ -29,13 +29,41 @@ if not secret:
     print("MCP_SECRET is not set", file=sys.stderr)
     sys.exit(1)
 
-# Render's value boxes can hold a stray space or line break that Cronometer's
-# website ignores but its app login rejects; trim them so the login matches.
-for _name in ("CRONOMETER_USERNAME", "CRONOMETER_PASSWORD", "CRONOMETER_TOTP_SECRET"):
-    _raw = os.environ.get(_name)
-    if _raw is not None and _raw != _raw.strip():
-        os.environ[_name] = _raw.strip()
-        print(f"Note: removed extra spaces or line breaks from {_name}", file=sys.stderr)
+# Clean up values pasted into Render the way Cronometer's own app does before
+# logging in: drop invisible characters and surrounding spaces/line breaks, and
+# lowercase the email.
+import unicodedata
+
+
+def _clean(name):
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    value = "".join(c for c in raw if unicodedata.category(c) not in ("Cf", "Cc")).strip()
+    if name == "CRONOMETER_USERNAME":
+        value = value.lower()
+    if value != raw:
+        print(f"Note: cleaned up {name} (spaces, line breaks, hidden characters or capitals)", file=sys.stderr)
+    os.environ[name] = value
+    return value
+
+
+_email = _clean("CRONOMETER_USERNAME") or ""
+_password = _clean("CRONOMETER_PASSWORD") or ""
+_clean("CRONOMETER_TOTP_SECRET")
+
+# Private self-check printed to the Render log; never shows the actual values.
+if "@" in _email:
+    _local, _domain = _email.split("@", 1)
+    _shown = f"{_local[:2]}...@{_domain}"
+else:
+    _shown = "DOES NOT LOOK LIKE AN EMAIL"
+print(
+    f"Login check: email {_shown} ({len(_email)} characters); "
+    f"password {len(_password)} characters"
+    f"{', contains non-English characters' if not _password.isascii() else ''}",
+    file=sys.stderr,
+)
 
 import uvicorn
 from mcp.server.transport_security import TransportSecuritySettings
